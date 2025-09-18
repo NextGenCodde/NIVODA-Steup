@@ -96,15 +96,16 @@ async function getAuthToken() {
 }
 
 // Query Nivoda GraphQL API (CERT search)
+// Query Nivoda GraphQL API (CERT search) - robust: try diamonds_by_query then fallback to offers_by_query
 async function searchNivodaDiamond(certArray) {
-  // certArray should be an array of strings (e.g. ["7235275727"])
   const token = await getAuthToken();
 
-  const diamondQuery = `
-    query SearchByCertificate($token: String!, $certNumbers: [String!]!) {
-      as(token: $token) {
+  // Template A: diamonds_by_query (inline token) - matches staging style
+  const queryA = `
+    query SearchByCertificate($certNumbers: [String!]!) {
+      as(token: "${token}") {
         diamonds_by_query(
-          query: { 
+          query: {
             certificate_numbers: $certNumbers
           },
           limit: 5
@@ -115,7 +116,6 @@ async function searchNivodaDiamond(certArray) {
             diamond {
               id
               image
-              video
               certificate {
                 id
                 certNumber
@@ -124,18 +124,9 @@ async function searchNivodaDiamond(certArray) {
                 carats
                 color
                 clarity
-                cut
-                polish
-                symmetry
-              }
-              measurements {
-                length
-                width
-                height
               }
             }
             price
-            discount
             availability
           }
         }
@@ -143,32 +134,95 @@ async function searchNivodaDiamond(certArray) {
     }
   `;
 
-  const variables = {
-    token: token,
-    certNumbers: certArray,
+  // Template B: offers_by_query fallback (production sometimes exposes offers instead)
+  // NOTE: this structure is a best-effort guess — if Nivoda uses a different shape we'll surface the raw error.
+  const queryB = `
+    query SearchOffersByCertificate($certNumbers: [String!]!) {
+      as(token: "${token}") {
+        offers_by_query(
+          query: {
+            certificate_numbers: $certNumbers
+          },
+          limit: 5
+        ) {
+          total_count
+          items {
+            id
+            offer {
+              id
+              price
+              product {
+                id
+                image
+                certificate {
+                  certNumber
+                  lab
+                  shape
+                  carats
+                  color
+                  clarity
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  // Helper to call the GraphQL endpoint
+  async function doCall(query, variables) {
+    const resp = await fetchFn(NIVODA_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ query, variables }),
+    });
+    const text = await resp.text();
+    let json;
+    try { json = JSON.parse(text); } catch (e) {
+      throw new Error(`Invalid JSON from Nivoda: ${text}`);
+    }
+    if (!resp.ok) {
+      // surface HTTP + GraphQL error payload
+      const errText = JSON.stringify(json);
+      throw new Error(`Nivoda API Error: ${resp.status} ${errText}`);
+    }
+    if (json.errors) {
+      // return full errors so caller can decide
+      return { errors: json.errors, data: json.data || null };
+    }
+    return { data: json.data };
+  }
+
+  // 1) Try diamonds_by_query first
+  const vars = { certNumbers: certArray };
+  const tryA = await doCall(queryA, vars);
+  if (tryA.data) {
+    return tryA.data;
+  }
+
+  // If errors exist, check if it's the specific "Cannot query field \"diamonds_by_query\"" error
+  if (tryA.errors && tryA.errors.some(e => /Cannot query field\s+"diamonds_by_query"/.test(e.message))) {
+    console.warn("diamonds_by_query not present on schema: will try offers_by_query fallback.");
+  } else if (tryA.errors) {
+    // If errors exist but not the missing-field type, still attempt fallback but include the errors in logs
+    console.warn("GraphQL returned errors for diamonds_by_query:", tryA.errors);
+  }
+
+  // 2) Fallback: try offers_by_query
+  const tryB = await doCall(queryB, vars);
+  if (tryB.data) {
+    return tryB.data;
+  }
+
+  // 3) If both returned errors, throw combined message for debugging
+  const combinedErrors = {
+    diamonds_errors: tryA.errors || null,
+    offers_errors: tryB.errors || null
   };
-
-  const response = await fetchFn(NIVODA_API, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({ query: diamondQuery, variables }),
-  });
-
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Nivoda API Error: ${response.status} ${text}`);
-  }
-
-  const json = JSON.parse(text);
-  if (json.errors) {
-    throw new Error("GraphQL Error: " + JSON.stringify(json.errors));
-  }
-
-  return json;
+  throw new Error("Both diamonds_by_query and offers_by_query failed: " + JSON.stringify(combinedErrors));
 }
+
 
 // Create Shopify product URL (cleaner)
 function createProductUrl(item, cert) {
