@@ -1,4 +1,4 @@
-// server.js (Debug Enhanced Version)
+// server.js (Corrected for Nivoda API)
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -26,13 +26,13 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(null, true); // Allow all origins for debugging
+      callback(null, true); // Allow all origins for now
     }
   },
   credentials: true
 }));
 
-const NIVODA_API = process.env.NIVODA_API;
+const NIVODA_API = process.env.NIVODA_API; // https://integrations.nivoda.net/api/diamonds
 const NIVODA_USER = process.env.NIVODA_USER;
 const NIVODA_PASS = process.env.NIVODA_PASS;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
@@ -45,14 +45,21 @@ console.log('Server Config:', {
   SHOPIFY_STORE
 });
 
-// Token caching for authenticate flow
+// Token caching
 let cachedToken = null;
 let tokenExpiry = 0;
 
-async function authenticateAndGetToken() {
+// Get authentication token
+async function getAuthToken() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiry) return cachedToken;
+  if (cachedToken && now < tokenExpiry) {
+    console.log('Using cached token');
+    return cachedToken;
+  }
 
+  console.log('Getting new authentication token...');
+  
+  // First, authenticate to get token
   const authQuery = `{
     authenticate {
       username_and_password(username: "${NIVODA_USER}", password: "${NIVODA_PASS}") {
@@ -61,243 +68,152 @@ async function authenticateAndGetToken() {
     }
   }`;
 
-  console.log('Authenticating with Nivoda...');
-  const r = await fetchFn(NIVODA_API, {
+  const authResponse = await fetchFn(NIVODA_API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query: authQuery }),
   });
 
-  const text = await r.text();
-  console.log('Auth Response Status:', r.status);
-  console.log('Auth Response:', text);
-  
-  let json;
+  const authText = await authResponse.text();
+  console.log('Auth Response Status:', authResponse.status);
+  console.log('Auth Response:', authText);
+
+  let authJson;
   try {
-    json = JSON.parse(text);
+    authJson = JSON.parse(authText);
   } catch (e) {
-    throw new Error("Auth response not JSON: " + text);
+    throw new Error("Auth response not JSON: " + authText);
   }
 
-  const token = json?.data?.authenticate?.username_and_password?.token;
-  if (!token) throw new Error("Auth failed. Raw: " + text);
-  
+  const token = authJson?.data?.authenticate?.username_and_password?.token;
+  if (!token) {
+    throw new Error("Failed to get authentication token: " + authText);
+  }
+
   cachedToken = token;
-  tokenExpiry = now + 1000 * 60 * 60 * 5.5;
-  console.log('Authentication successful, token cached');
+  tokenExpiry = now + 1000 * 60 * 60 * 5; // Cache for 5 hours
+  console.log('Authentication token obtained successfully');
   return token;
 }
 
-async function postGraphQL(query) {
-  console.log('Sending GraphQL Query:', query);
-  
-  if (USE_BASIC_AUTH) {
-    const basic = Buffer.from(`${NIVODA_USER}:${NIVODA_PASS}`).toString("base64");
-    console.log('Using Basic Auth');
-    return fetchFn(NIVODA_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Basic ${basic}`,
-      },
-      body: JSON.stringify({ query }),
-    });
-  } else {
-    const token = await authenticateAndGetToken();
-    console.log('Using Bearer Token');
-    return fetchFn(NIVODA_API, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify({ query }),
-    });
-  }
-}
-
-// Test basic GraphQL connection
-async function testConnection() {
-  const testQuery = `
-    query {
-      diamonds_by_query(
-        query: {},
-        limit: 1
-      ) {
-        total_count
-      }
-    }
-  `;
-  
-  try {
-    const r = await postGraphQL(testQuery);
-    const text = await r.text();
-    console.log('Connection Test Status:', r.status);
-    console.log('Connection Test Response:', text);
-    return { status: r.status, response: text };
-  } catch (error) {
-    console.error('Connection Test Failed:', error);
-    return { error: error.message };
-  }
-}
-
-// Enhanced diamond query with better error handling
+// Query diamonds using the correct API structure
 async function queryByCertificate(cert) {
-  // Try different GraphQL query structures
-  const queries = [
-    // Query 1: Standard certificate_numbers array
-    `
-    query {
-      diamonds_by_query(
-        query: { certificate_numbers: ["${cert}"] },
-        limit: 5
-      ) {
-        total_count
-        items {
-          id
-          diamond {
-            id
-            image
-            certificate {
-              certNumber
-              lab
-              shape
-              carats
-              color
-              clarity
-              cut
-            }
-            measurements {
-              length
-              width
-              height
-            }
-          }
-          price
-          availability
-        }
-      }
-    }
-    `,
-    // Query 2: Try with certificate_number (singular)
-    `
-    query {
-      diamonds_by_query(
-        query: { certificate_number: "${cert}" },
-        limit: 5
-      ) {
-        total_count
-        items {
-          id
-          diamond {
-            id
-            image
-            certificate {
-              certNumber
-              lab
-              shape
-              carats
-            }
-          }
-          price
-        }
-      }
-    }
-    `,
-    // Query 3: Try search in general query
-    `
-    query {
-      diamonds_by_query(
-        query: { search: "${cert}" },
-        limit: 5
-      ) {
-        total_count
-        items {
-          id
-          diamond {
-            id
-            certificate {
-              certNumber
-              lab
-            }
-          }
-          price
-        }
-      }
-    }
-    `
-  ];
-
-  const results = [];
-  
-  for (let i = 0; i < queries.length; i++) {
-    const query = queries[i];
-    console.log(`Trying query ${i + 1} for certificate: ${cert}`);
+  try {
+    const token = await getAuthToken();
     
+    // Use the correct query structure with as(token:...) wrapper
+    const diamondQuery = `
+      query {
+        as(token: "${token}") {
+          diamonds_by_query(
+            query: { certificate_numbers: ["${cert}"] },
+            limit: 5
+          ) {
+            total_count
+            items {
+              id
+              diamond {
+                id
+                image
+                certificate {
+                  certNumber
+                  lab
+                  shape
+                  carats
+                  color
+                  clarity
+                  cut
+                }
+                measurements {
+                  length
+                  width
+                  height
+                }
+              }
+              price
+              availability
+            }
+          }
+        }
+      }
+    `;
+
+    console.log('Querying with certificate:', cert);
+    console.log('GraphQL Query:', diamondQuery);
+
+    const response = await fetchFn(NIVODA_API, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ query: diamondQuery }),
+    });
+
+    const text = await response.text();
+    console.log('Query Response Status:', response.status);
+    console.log('Query Response:', text);
+
+    let json;
     try {
-      const r = await postGraphQL(query);
-      const text = await r.text();
-      console.log(`Query ${i + 1} Status:`, r.status);
-      console.log(`Query ${i + 1} Response:`, text);
-      
-      let json;
-      try {
-        json = JSON.parse(text);
-      } catch (e) {
-        json = { parseError: true, raw: text };
-      }
-      
-      const result = { queryIndex: i + 1, status: r.status, json, rawText: text };
-      results.push(result);
-      
-      // If this query was successful and found results, return it
-      const total = json?.data?.diamonds_by_query?.total_count ?? 0;
-      if (r.status === 200 && total > 0) {
-        console.log(`Query ${i + 1} found ${total} diamonds!`);
-        return result;
-      }
-      
-      // If status is 200 but no results, continue to next query
-      if (r.status === 200 && total === 0) {
-        console.log(`Query ${i + 1} executed successfully but found 0 diamonds`);
-        continue;
-      }
-      
-      // If there's an error, log it but continue
-      if (r.status !== 200) {
-        console.log(`Query ${i + 1} failed with status ${r.status}`);
-        continue;
-      }
-      
-    } catch (error) {
-      console.error(`Query ${i + 1} threw error:`, error);
-      results.push({ queryIndex: i + 1, error: error.message });
+      json = JSON.parse(text);
+    } catch (e) {
+      return { status: response.status, json: { parseError: true, raw: text }, rawText: text };
     }
+
+    return { status: response.status, json, rawText: text };
+
+  } catch (error) {
+    console.error('Query error:', error);
+    return { status: 500, error: error.message };
   }
+}
+
+// Create Shopify product URL (simplified for now)
+function createProductUrl(diamond, cert) {
+  const certificate = diamond.certificate;
+  const productTitle = `${certificate.shape || 'Diamond'} ${certificate.carats}ct ${certificate.lab} ${cert}`;
+  const handle = productTitle.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
   
-  // If we get here, none of the queries found results
-  return { allResults: results, status: 404, json: { data: { diamonds_by_query: { total_count: 0 } } } };
+  return `https://${SHOPIFY_STORE}/products/${handle}`;
 }
 
 // Health check
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Debug endpoint with connection test
+// Debug endpoint
 app.get("/debug-auth", async (req, res) => {
   try {
-    const authResult = USE_BASIC_AUTH 
-      ? { ok: true, auth: "basic", user: NIVODA_USER }
-      : await (async () => {
-          const token = await authenticateAndGetToken();
-          return { ok: true, auth: "token", token_sample: token.slice(0, 20) + "..." };
-        })();
+    const token = await getAuthToken();
     
-    // Test connection
-    const connectionTest = await testConnection();
+    // Test a basic query
+    const testQuery = `
+      query {
+        as(token: "${token}") {
+          diamonds_by_query(query: {}, limit: 1) {
+            total_count
+          }
+        }
+      }
+    `;
+
+    const testResponse = await fetchFn(NIVODA_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: testQuery }),
+    });
+
+    const testText = await testResponse.text();
     
     return res.json({
-      ...authResult,
-      connectionTest
+      ok: true,
+      auth: "token",
+      token_sample: token.slice(0, 20) + "...",
+      connectionTest: {
+        status: testResponse.status,
+        response: testText
+      }
     });
   } catch (err) {
     console.error("debug-auth error", err);
@@ -305,7 +221,7 @@ app.get("/debug-auth", async (req, res) => {
   }
 });
 
-// Enhanced search endpoint with detailed debugging
+// Main search endpoint
 app.get("/search", async (req, res) => {
   try {
     const cert = (req.query.certificate || "").trim();
@@ -336,8 +252,12 @@ app.get("/search", async (req, res) => {
       const result = await queryByCertificate(variant);
       
       let total = 0;
-      if (result.json && result.json.data && result.json.data.diamonds_by_query) {
-        total = result.json.data.diamonds_by_query.total_count || 0;
+      let items = [];
+      
+      if (result.json && result.json.data && result.json.data.as && result.json.data.as.diamonds_by_query) {
+        const queryResult = result.json.data.as.diamonds_by_query;
+        total = queryResult.total_count || 0;
+        items = queryResult.items || [];
       }
       
       const attemptResult = { 
@@ -345,18 +265,18 @@ app.get("/search", async (req, res) => {
         status: result.status, 
         total, 
         hasData: total > 0,
-        queryDetails: result.allResults || [{ queryIndex: result.queryIndex, status: result.status }]
+        error: result.error || null
       };
       
       attempts.push(attemptResult);
 
       if (total > 0) {
-        const item = result.json.data.diamonds_by_query.items[0];
+        const item = items[0];
         console.log('FOUND DIAMOND:', item);
         
-        // Create simple redirect URL for now
-        const redirectUrl = `https://${SHOPIFY_STORE}/search?q=${encodeURIComponent(cert)}`;
-
+        // Create product URL
+        const redirectUrl = createProductUrl(item.diamond, variant);
+        
         return res.json({
           found: true,
           variantMatched: variant,
@@ -366,7 +286,7 @@ app.get("/search", async (req, res) => {
           debug: {
             originalCert: cert,
             matchedVariant: variant,
-            nivodaResponse: result.json
+            totalFound: total
           }
         });
       }
@@ -392,7 +312,22 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// Test endpoint for manual testing
+// Test endpoint to try with known working certificates
+app.get("/test-known", async (req, res) => {
+  // Try with one of the certificate numbers from your test data
+  const knownCerts = ["7235275727", "6385008601", "2233521189"];
+  const results = [];
+  
+  for (const cert of knownCerts) {
+    console.log(`Testing known certificate: ${cert}`);
+    const result = await queryByCertificate(cert);
+    results.push({ cert, result });
+  }
+  
+  return res.json({ knownCertificateTests: results });
+});
+
+// Manual test endpoint
 app.get("/test/:cert", async (req, res) => {
   try {
     const cert = req.params.cert;
@@ -408,8 +343,6 @@ app.get("/test/:cert", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Nivoda proxy server listening on port ${PORT}`);
-  console.log(`USE_BASIC_AUTH: ${USE_BASIC_AUTH}`);
-  console.log(`SHOP_DOMAIN: ${process.env.SHOP_DOMAIN}`);
   console.log(`NIVODA_API: ${NIVODA_API}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });
