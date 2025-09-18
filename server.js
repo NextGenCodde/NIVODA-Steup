@@ -1,4 +1,4 @@
-// server.js (REST API Wrapper for Nivoda GraphQL)
+// server.js (REST API Wrapper for Nivoda GraphQL) — FIXED
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -14,29 +14,32 @@ else {
 const app = express();
 app.use(express.json());
 
-// CORS configuration
-app.use(cors({
-  origin: function (origin, callback) {
-    const allowedOrigins = [
-      process.env.SHOP_DOMAIN,
-      'https://alturadiamonds.com',
-      'http://localhost:3000',
-    ].filter(Boolean);
-    
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, true);
-    }
-  },
-  credentials: true
-}));
+// CORS configuration (keep as you had)
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      const allowedOrigins = [
+        process.env.SHOP_DOMAIN,
+        "https://alturadiamonds.com",
+        "http://localhost:3000",
+      ].filter(Boolean);
+      // allow if no origin (server-to-server) or in allowed list
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        // For debugging you might want to block unknown origins; for now allow
+        callback(null, true);
+      }
+    },
+    credentials: true,
+  })
+);
 
-const NIVODA_API = process.env.NIVODA_API;
+const NIVODA_API = process.env.NIVODA_API; // e.g. https://integrations.nivoda.net/graphql
 const NIVODA_USER = process.env.NIVODA_USER;
 const NIVODA_PASS = process.env.NIVODA_PASS;
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
-const MAP_BASE_URL = process.env.MAP_BASE_URL;
+const MAP_BASE_URL =
+  process.env.MAP_BASE_URL || "https://alturadiamonds.com/products/";
 
 // Token caching
 let cachedToken = null;
@@ -61,21 +64,21 @@ async function getAuthToken() {
 
   const authResponse = await fetchFn(NIVODA_API, {
     method: "POST",
-    headers: { 
+    headers: {
       "Content-Type": "application/json",
-      "Accept": "application/json"
+      Accept: "application/json",
     },
     body: JSON.stringify({ query: authQuery }),
   });
 
   const authText = await authResponse.text();
-  
   if (!authResponse.ok) {
-    throw new Error(`Authentication failed: ${authResponse.status}`);
+    throw new Error(
+      `Authentication failed: ${authResponse.status} ${authText}`
+    );
   }
 
   const authJson = JSON.parse(authText);
-  
   if (authJson.errors) {
     throw new Error("GraphQL Auth Error: " + JSON.stringify(authJson.errors));
   }
@@ -85,21 +88,24 @@ async function getAuthToken() {
     throw new Error("Failed to get authentication token");
   }
 
+  // Cache token for 6 hours minus 1 minute buffer
   cachedToken = token;
-  tokenExpiry = now + 1000 * 60 * 60 * 4; // Cache for 4 hours
+  tokenExpiry = now + 6 * 60 * 60 * 1000 - 60 * 1000;
+  console.log("Got new Nivoda token (cached for ~6h)");
   return token;
 }
 
-// Query Nivoda GraphQL API
-async function searchNivodaDiamond(cert) {
+// Query Nivoda GraphQL API (CERT search)
+async function searchNivodaDiamond(certArray) {
+  // certArray should be an array of strings (e.g. ["7235275727"])
   const token = await getAuthToken();
-  
+
   const diamondQuery = `
-    query SearchByCertificate($token: String!, $certNumber: String!) {
+    query SearchByCertificate($token: String!, $certNumbers: [String!]!) {
       as(token: $token) {
         diamonds_by_query(
           query: { 
-            certificate_numbers: [$certNumber]
+            certificate_numbers: $certNumbers
           },
           limit: 5
         ) {
@@ -139,29 +145,24 @@ async function searchNivodaDiamond(cert) {
 
   const variables = {
     token: token,
-    certNumber: cert
+    certNumbers: certArray,
   };
 
   const response = await fetchFn(NIVODA_API, {
     method: "POST",
-    headers: { 
+    headers: {
       "Content-Type": "application/json",
-      "Accept": "application/json"
+      Accept: "application/json",
     },
-    body: JSON.stringify({ 
-      query: diamondQuery,
-      variables: variables
-    }),
+    body: JSON.stringify({ query: diamondQuery, variables }),
   });
 
   const text = await response.text();
-  
   if (!response.ok) {
-    throw new Error(`Nivoda API Error: ${response.status}`);
+    throw new Error(`Nivoda API Error: ${response.status} ${text}`);
   }
 
   const json = JSON.parse(text);
-  
   if (json.errors) {
     throw new Error("GraphQL Error: " + JSON.stringify(json.errors));
   }
@@ -169,172 +170,207 @@ async function searchNivodaDiamond(cert) {
   return json;
 }
 
-// Create Shopify product URL
-function createProductUrl(diamond, cert) {
-  const certificate = diamond.certificate || {};
-  const shape = certificate.shape || 'Diamond';
-  const carats = certificate.carats || '';
-  const lab = certificate.lab || '';
-  const color = certificate.color || '';
-  const clarity = certificate.clarity || '';
-  
-  // Create descriptive product title
-  const parts = [carats + 'ct', shape, lab, color, clarity, cert].filter(Boolean);
-  const productTitle = parts.join('-');
-  
+// Create Shopify product URL (cleaner)
+function createProductUrl(item, cert) {
+  // item should be the `diamond` object (item.diamond.certificate)
+  const certificate = (item && item.certificate) || {};
+  const shape = certificate.shape || "Diamond";
+  const carats =
+    certificate.carats !== undefined && certificate.carats !== null
+      ? `${certificate.carats}`
+      : "";
+  const lab = certificate.lab || "";
+  const color = certificate.color || "";
+  const clarity = certificate.clarity || "";
+
+  // Build title parts while avoiding empty pieces
+  const parts = [
+    carats ? `${carats}ct` : "",
+    shape,
+    lab,
+    color,
+    clarity,
+    cert,
+  ].filter(Boolean);
+  const productTitle = parts.join(" ").trim();
+
   // Create URL handle (Shopify-friendly)
-  const handle = productTitle.toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  
+  const handle = productTitle
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
   return `${MAP_BASE_URL}${handle}`;
 }
 
 // Generate certificate variants
 function generateCertificateVariants(cert) {
-  return Array.from(
-    new Set([
-      cert,                                    // Original: LG628496664
-      cert.toUpperCase(),                      // Uppercase: LG628496664
-      cert.toLowerCase(),                      // Lowercase: lg628496664
-      cert.replace(/^LG/i, ''),               // Remove LG prefix: 628496664
-      cert.replace(/^LG/i, '').padStart(10, '0'), // Pad with zeros: 0628496664
-      cert.replace(/[^0-9]/g, ''),            // Numbers only: 628496664
-      cert.replace(/\s+/g, ''),               // Remove spaces
-      cert.replace(/^0+/, ''),                // Remove leading zeros
-    ])
-  ).filter(v => v && v.length >= 3);
+  const v = new Set([
+    cert,
+    cert.toUpperCase(),
+    cert.toLowerCase(),
+    cert.replace(/^LG/i, ""), // remove LG prefix
+    cert.replace(/^LG/i, "").replace(/^0+/, ""), // remove leading zeros after removing LG
+    cert.replace(/[^0-9]/g, ""), // numbers only
+    cert.replace(/\s+/g, ""), // remove spaces
+  ]);
+
+  // Filter short garbage
+  return Array.from(v).filter((x) => x && x.length >= 2);
 }
 
-// 🎯 MAIN REST API ENDPOINT (Like Aurelinne's)
+// MAIN REST API ENDPOINT
 app.get("/search", async (req, res) => {
   try {
-    const cert = (req.query.certificate || "").trim();
-    
-    if (!cert) {
-      return res.status(400).json({ 
-        error: "Certificate parameter is required" 
-      });
+    const certRaw = (req.query.certificate || "").trim();
+    if (!certRaw)
+      return res
+        .status(400)
+        .json({ error: "Certificate parameter is required" });
+
+    console.log(`Search request for certificate: ${certRaw}`);
+    const variants = generateCertificateVariants(certRaw);
+    console.log("Variants:", variants);
+
+    // Try variants in batches: we can pass multiple variants at once to speed up (Nivoda will match any)
+    // We'll try N variants in one call to reduce round-trips (useful when client includes LG prefix)
+    // Strategy: try all variants at once
+    try {
+      const result = await searchNivodaDiamond(variants);
+      const queryResult = result?.data?.as?.diamonds_by_query;
+      const total = queryResult?.total_count || 0;
+      const items = queryResult?.items || [];
+
+      if (total > 0 && items.length > 0) {
+        // pick best match (first)
+        const found = items[0];
+        const diamondObj = found.diamond || {};
+        const certificate = diamondObj.certificate || {};
+        const productUrl = createProductUrl(
+          certificate,
+          certificate.certNumber || certRaw
+        );
+
+        // ensure we pick an id if available
+        const id = found.id || diamondObj.id || certificate.id || null;
+
+        return res.json({
+          url: productUrl,
+          found: true,
+          certificate: certificate.certNumber || certRaw,
+          diamond: {
+            id,
+            shape: certificate.shape,
+            carats: certificate.carats,
+            color: certificate.color,
+            clarity: certificate.clarity,
+            lab: certificate.lab,
+            price: found.price,
+            image: diamondObj.image,
+          },
+        });
+      }
+    } catch (errInner) {
+      console.warn("Search call failed:", errInner && errInner.message);
+      // Fallthrough to try individual variants below (rare)
     }
 
-    console.log(`Searching for certificate: ${cert}`);
-
-    // Generate certificate variants
-    const variants = generateCertificateVariants(cert);
-    
-    // Try each variant until we find a match
+    // If batch didn't return, try per-variant (legacy fallback)
     for (const variant of variants) {
       try {
-        console.log(`Trying variant: ${variant}`);
-        
-        const result = await searchNivodaDiamond(variant);
-        
+        const result = await searchNivodaDiamond([variant]);
         const queryResult = result?.data?.as?.diamonds_by_query;
         const total = queryResult?.total_count || 0;
         const items = queryResult?.items || [];
-        
+
         if (total > 0 && items.length > 0) {
-          const item = items[0];
-          const productUrl = createProductUrl(item.diamond, variant);
-          
-          console.log(`Found diamond! Redirecting to: ${productUrl}`);
-          
-          // 🎯 SIMPLE RESPONSE LIKE AURELINNE
+          const found = items[0];
+          const diamondObj = found.diamond || {};
+          const certificate = diamondObj.certificate || {};
+          const productUrl = createProductUrl(
+            certificate,
+            certificate.certNumber || variant
+          );
+          const id = found.id || diamondObj.id || certificate.id || null;
+
           return res.json({
             url: productUrl,
             found: true,
-            certificate: variant,
+            certificate: certificate.certNumber || variant,
             diamond: {
-              id: item.id,
-              shape: item.diamond.certificate?.shape,
-              carats: item.diamond.certificate?.carats,
-              color: item.diamond.certificate?.color,
-              clarity: item.diamond.certificate?.clarity,
-              lab: item.diamond.certificate?.lab,
-              price: item.price,
-              image: item.diamond.image
-            }
+              id,
+              shape: certificate.shape,
+              carats: certificate.carats,
+              color: certificate.color,
+              clarity: certificate.clarity,
+              lab: certificate.lab,
+              price: found.price,
+              image: diamondObj.image,
+            },
           });
         }
-      } catch (variantError) {
-        console.log(`Variant ${variant} failed:`, variantError.message);
-        // Continue to next variant
+      } catch (e) {
+        console.log(`Variant ${variant} error:`, e.message);
       }
     }
 
-    // No diamond found
-    console.log(`No diamond found for certificate: ${cert}`);
+    // Not found
     return res.status(404).json({
       error: "Diamond not found",
       message: "Certificate number not found in our inventory",
-      certificate: cert,
-      variants_tried: variants
+      certificate: certRaw,
+      variants_tried: variants,
     });
-
   } catch (error) {
-    console.error("Search error:", error);
-    return res.status(500).json({ 
+    console.error("Search error:", error && error.message);
+    return res.status(500).json({
       error: "Internal server error",
-      message: "Something went wrong while searching"
+      message: error && error.message,
     });
   }
 });
 
 // Health check
-app.get("/health", (req, res) => {
-  res.json({ ok: true, status: "healthy" });
-});
+app.get("/health", (req, res) => res.json({ ok: true, status: "healthy" }));
 
-// Test authentication
+// Test auth
 app.get("/test-auth", async (req, res) => {
   try {
     const token = await getAuthToken();
-    res.json({ 
-      ok: true, 
-      authenticated: true,
-      token_length: token.length 
-    });
+    res.json({ ok: true, authenticated: true, token_length: token.length });
   } catch (error) {
-    res.status(500).json({ 
-      ok: false, 
-      authenticated: false,
-      error: error.message 
-    });
+    res
+      .status(500)
+      .json({ ok: false, authenticated: false, error: error.message });
   }
 });
 
-// Test specific certificate
+// Test specific cert
 app.get("/test/:cert", async (req, res) => {
   try {
     const cert = req.params.cert;
-    const result = await searchNivodaDiamond(cert);
-    
+    const result = await searchNivodaDiamond([cert]);
     const queryResult = result?.data?.as?.diamonds_by_query;
     const total = queryResult?.total_count || 0;
-    
     res.json({
       certificate: cert,
       found: total > 0,
       total_count: total,
-      items: queryResult?.items || []
+      items: queryResult?.items || [],
     });
   } catch (error) {
-    res.status(500).json({ 
-      certificate: req.params.cert,
-      error: error.message 
-    });
+    res
+      .status(500)
+      .json({ certificate: req.params.cert, error: error.message });
   }
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`\n🚀 Diamond Search REST API`);
-  console.log(`📡 Server: http://localhost:${PORT}`);
-  console.log(`\n📋 Endpoints:`);
-  console.log(`   GET /search?certificate=XXX - Search diamonds (like Aurelinne)`);
-  console.log(`   GET /health - Health check`);
-  console.log(`   GET /test-auth - Test Nivoda authentication`);
-  console.log(`   GET /test/:cert - Test specific certificate\n`);
+  console.log(`🚀 Diamond Search REST API running on port ${PORT}`);
+  console.log(
+    `Endpoints: GET /search?certificate=XXX    GET /test/:cert    GET /test-auth`
+  );
 });
