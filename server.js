@@ -97,16 +97,22 @@ async function getAuthToken() {
 
 // Query Nivoda GraphQL API (CERT search)
 // Query Nivoda GraphQL API (CERT search) - robust: try diamonds_by_query then fallback to offers_by_query
+// Robust searchNivodaDiamond — inlines token + certificate list into the query string
 async function searchNivodaDiamond(certArray) {
+  if (!Array.isArray(certArray)) certArray = [String(certArray)];
+
   const token = await getAuthToken();
 
-  // Use the same query shape you used in GraphiQL (as(token:"...") wrapper)
+  // Safely stringify certArray so it becomes ["LG123","123","..."] in the query text
+  const certListLiteral = JSON.stringify(certArray);
+
+  // Inline the token and the cert list into the query text to avoid variable/parse mismatches
   const gql = `
-    query SearchByCertificate($certNumbers: [String!]!) {
+    query {
       as(token: "${token}") {
         diamonds_by_query(
           query: {
-            certificate_numbers: $certNumbers
+            certificate_numbers: ${certListLiteral}
           },
           limit: 5
         ) {
@@ -116,16 +122,27 @@ async function searchNivodaDiamond(certArray) {
             diamond {
               id
               image
+              video
               certificate {
+                id
                 certNumber
                 lab
                 shape
                 carats
                 color
                 clarity
+                cut
+                polish
+                symmetry
+              }
+              measurements {
+                length
+                width
+                height
               }
             }
             price
+            discount
             availability
           }
         }
@@ -133,12 +150,10 @@ async function searchNivodaDiamond(certArray) {
     }
   `;
 
-  const variables = { certNumbers: certArray };
+  const body = JSON.stringify({ query: gql });
 
-  const body = JSON.stringify({ query: gql, variables });
-
-  // LOG the outgoing request (body + endpoint)
-  console.log(">>> Nivoda request ->", { url: NIVODA_API, body, headers: { "Content-Type": "application/json" } });
+  // DEBUG LOG (comment out in production if noisy)
+  console.log(">>> Nivoda request ->", { url: NIVODA_API, body });
 
   const resp = await fetchFn(NIVODA_API, {
     method: "POST",
@@ -148,11 +163,10 @@ async function searchNivodaDiamond(certArray) {
 
   const respText = await resp.text();
 
-  // Log the raw response from Nivoda
+  // DEBUG LOG of response (comment out in production if noisy)
   console.log("<<< Nivoda response status:", resp.status);
   console.log("<<< Nivoda response text:", respText);
 
-  // Basic checks & parse
   if (!resp.ok) {
     throw new Error(`Nivoda API Error: ${resp.status} ${respText}`);
   }
@@ -164,13 +178,15 @@ async function searchNivodaDiamond(certArray) {
     throw new Error("Invalid JSON from Nivoda: " + respText);
   }
 
+  // If GraphQL returned errors surface them to caller (so /test/:cert will show exactly why)
   if (json.errors) {
-    // return full JSON so caller can inspect
+    // return the raw JSON object so caller can inspect in your /test endpoint
     return json;
   }
 
   return json;
 }
+
 
 
 
