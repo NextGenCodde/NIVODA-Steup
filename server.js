@@ -42,7 +42,9 @@ async function authenticate() {
   const json = await res.json();
   return json.data.authenticate.username_and_password.token;
 }
-
+app.get("health", (req, res) => {
+  res.send("OK");
+});
 // ---------------- SEARCH ROUTE ----------------
 app.post("/search", async (req, res) => {
   try {
